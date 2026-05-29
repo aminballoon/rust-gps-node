@@ -1,0 +1,32 @@
+{
+  "general": {
+    "device_type": "ublox",
+    "log_directory": "./logs",
+    "log_rotation_hours": 1
+  },
+  "serial": {
+    "port": "/dev/ttyACM0",
+    "baud_rate": "auto"
+  },
+  "ntrip": {
+    "enabled": true,
+    "caster_host": "YOUR_NTRIP_CASTER_HOST",
+    "caster_port": 2101,
+    "username": "YOUR_NTRIP_USERNAME",
+    "password": "YOUR_NTRIP_PASSWORD",
+    "mountpoint": "YOUR_MOUNTPOINT"
+  },
+  "mqtt": {
+    "enabled": false,
+    "broker_host": "broker.hivemq.com",
+    "broker_port": 1883,
+    "client_id": "gps_rtk_node_01",
+    "topic": "gps/telemetry",
+    "username": "",
+    "password": ""
+  },
+  "watchdog": {
+    "check_interval_secs": 2,
+    "heartbeat_timeout_secs": 10
+  }
+}
