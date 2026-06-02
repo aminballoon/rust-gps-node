@@ -23,9 +23,31 @@ async fn read_headers(stream: &mut TcpStream) -> Result<String> {
         }
     }
     
-    let header_str = String::from_utf8(header_bytes)
-        .context("NTRIP Caster headers were not valid UTF-8")?;
+    let header_str = String::from_utf8_lossy(&header_bytes).into_owned();
     Ok(header_str)
+}
+
+fn get_longitude_from_gga(gga: &str) -> Option<f64> {
+    let clean = gga.trim().trim_start_matches('$');
+    let star_idx = clean.find('*').unwrap_or(clean.len());
+    let payload = &clean[..star_idx];
+    let fields: Vec<&str> = payload.split(',').collect();
+    if fields.len() > 5 && fields[0].ends_with("GGA") {
+        let lon_str = fields[4];
+        let ew = fields[5];
+        if lon_str.len() >= 5 {
+            let deg_str = &lon_str[..3];
+            let min_str = &lon_str[3..];
+            if let (Ok(deg), Ok(min)) = (deg_str.parse::<f64>(), min_str.parse::<f64>()) {
+                let mut lon = deg + (min / 60.0);
+                if ew == "W" {
+                    lon = -lon;
+                }
+                return Some(lon);
+            }
+        }
+    }
+    None
 }
 
 pub async fn run_ntrip(
@@ -42,6 +64,32 @@ pub async fn run_ntrip(
         }
     }
 
+    let mut mountpoint = config.mountpoint.clone();
+    let mut initial_gga = None;
+
+    if mountpoint == "auto" {
+        log::info!("NTRIP Mountpoint is set to 'auto'. Waiting for current position (GGA) from serial port...");
+        loop {
+            let _ = watchdog_tx.send(WatchdogMsg::Heartbeat("ntrip".to_string())).await;
+            tokio::select! {
+                Some(gga) = gga_rx.recv() => {
+                    if let Some(lon) = get_longitude_from_gga(&gga) {
+                        log::info!("Received current GPS position. Longitude: {:.4}°E", lon);
+                        if lon < 102.0 {
+                            mountpoint = "VRS_MSM5_UTM47_ITRF2014".to_string();
+                        } else {
+                            mountpoint = "VRS_MSM5_UTM48_ITRF2014".to_string();
+                        }
+                        log::info!("Auto-selected Mountpoint based on UTM zone: {}", mountpoint);
+                        initial_gga = Some(gga);
+                        break;
+                    }
+                }
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
     let caster_addr = format!("{}:{}", config.caster_host, config.caster_port);
     log::info!("Connecting to NTRIP Caster at {}", caster_addr);
     
@@ -49,7 +97,7 @@ pub async fn run_ntrip(
         .context(format!("Failed to connect to NTRIP caster {}", caster_addr))?;
 
     // Build HTTP GET request
-    let request = if config.mountpoint.is_empty() {
+    let request = if mountpoint.is_empty() {
         // Query sourcetable (Mountpoint list)
         format!(
             "GET / HTTP/1.1\r\n\
@@ -71,7 +119,7 @@ pub async fn run_ntrip(
              Ntrip-Version: Ntrip/2.0\r\n\
              Accept: */*\r\n\
              Connection: close\r\n\r\n",
-            config.mountpoint, config.caster_host, auth_b64
+            mountpoint, config.caster_host, auth_b64
         )
     };
 
@@ -89,7 +137,7 @@ pub async fn run_ntrip(
         return Err(anyhow!("NTRIP Caster returned non-success status: {}", status_line));
     }
 
-    if config.mountpoint.is_empty() {
+    if mountpoint.is_empty() {
         // Sourcetable mode - Read and parse all sourcetable entries
         log::info!("Fetching NTRIP Caster sourcetable (Mountpoints)...");
         let mut body = String::new();
@@ -118,12 +166,16 @@ pub async fn run_ntrip(
         }
     }
 
-    log::info!("Successfully connected to mountpoint: {}. Starting stream...", config.mountpoint);
+    log::info!("Successfully connected to mountpoint: {}. Starting stream...", mountpoint);
 
-    let mut last_gga_sent = Instant::now() - Duration::from_secs(10); // send immediately if available
+    let mut last_gga_sent = if initial_gga.is_some() {
+        Instant::now() - Duration::from_secs(10) // send immediately
+    } else {
+        Instant::now() - Duration::from_secs(10)
+    };
     let mut last_heartbeat = Instant::now();
     let mut buffer = [0u8; 4096];
-    let mut current_gga: Option<String> = None;
+    let mut current_gga = initial_gga;
 
     loop {
         // Watchdog Heartbeat
@@ -178,3 +230,53 @@ pub async fn run_ntrip(
 
     Err(anyhow!("NTRIP client task terminated unexpectedly"))
 }
+
+pub async fn scan_mountpoints(config: &NtripConfig) -> Result<()> {
+    let caster_addr = format!("{}:{}", config.caster_host, config.caster_port);
+    log::info!("Connecting to NTRIP Caster at {} to scan mountpoints", caster_addr);
+    
+    let mut stream = TcpStream::connect(&caster_addr).await
+        .context(format!("Failed to connect to NTRIP caster {}", caster_addr))?;
+
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: {}\r\n\
+         User-Agent: NTRIP RustClient/0.1\r\n\
+         Accept: */*\r\n\
+         Connection: close\r\n\r\n",
+        config.caster_host
+    );
+
+    stream.write_all(request.as_bytes()).await
+        .context("Failed sending NTRIP HTTP request")?;
+    stream.flush().await?;
+
+    let headers = read_headers(&mut stream).await?;
+    log::info!("NTRIP Caster response headers:\n{}", headers.trim());
+
+    let status_line = headers.lines().next().unwrap_or("");
+    if !status_line.contains("200") && !status_line.contains("ICY") {
+        return Err(anyhow!("NTRIP Caster returned non-success status: {}", status_line));
+    }
+
+    log::info!("Fetching NTRIP Caster sourcetable (Mountpoints)...");
+    let mut body = String::new();
+    stream.read_to_string(&mut body).await
+        .context("Failed to read sourcetable body")?;
+    
+    println!("\n========= NTRIP MOUNTPOINTS (SOURCETABLE) =========");
+    for line in body.lines() {
+        if line.starts_with("STR;") {
+            let parts: Vec<&str> = line.split(';').collect();
+            if parts.len() > 3 {
+                let mp_name = parts[1];
+                let city = parts[2];
+                let format = parts[3];
+                println!("Mountpoint: {:<15} | Location: {:<20} | Format: {}", mp_name, city, format);
+            }
+        }
+    }
+    println!("===================================================\n");
+    Ok(())
+}
+

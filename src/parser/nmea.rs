@@ -95,7 +95,7 @@ pub fn update_from_nmea(sentence: &str, telemetry: &mut GpsTelemetry) -> bool {
         if !fields[9].is_empty() {
             telemetry.altitude = fields[9].parse::<f64>().ok();
         }
-        log::info!("Parsed NMEA GGA: {}", sentence.trim());
+        log::debug!("Parsed NMEA GGA: {}", sentence.trim());
         return true;
     } else if msg_type.ends_with("RMC") {
         if fields.len() < 9 {
@@ -120,7 +120,7 @@ pub fn update_from_nmea(sentence: &str, telemetry: &mut GpsTelemetry) -> bool {
                 telemetry.heading = fields[8].parse().ok();
             }
         }
-        log::info!("Parsed NMEA RMC: {}", sentence.trim());
+        log::debug!("Parsed NMEA RMC: {}", sentence.trim());
         return true;
     } else if msg_type.ends_with("HDT") {
         if fields.len() < 2 {
@@ -129,7 +129,7 @@ pub fn update_from_nmea(sentence: &str, telemetry: &mut GpsTelemetry) -> bool {
         if !fields[1].is_empty() {
             telemetry.heading = fields[1].parse().ok();
         }
-        log::info!("Parsed NMEA HDT: {}", sentence.trim());
+        log::debug!("Parsed NMEA HDT: {}", sentence.trim());
         return true;
     }
     

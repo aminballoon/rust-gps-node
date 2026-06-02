@@ -19,6 +19,23 @@ async fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
+    // Check if command line argument is a scan command
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| {
+        arg == "scan"
+            || arg == "scan-mountpoints"
+            || arg == "scan_mountpoints"
+            || arg == "scan_mountpoint"
+            || arg == "scan-mountpoint"
+            || arg == "--scan"
+    }) {
+        let config_path = "config.json";
+        log::info!("Loading configuration for scan from: {}", config_path);
+        let config = AppConfig::load_from_file(config_path)?;
+        ntrip::scan_mountpoints(&config.ntrip).await?;
+        return Ok(());
+    }
+
     log::info!("=== Starting GPS RTK/PPK System Node ===");
 
     // Load configuration file

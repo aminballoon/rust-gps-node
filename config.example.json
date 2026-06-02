@@ -14,7 +14,7 @@
     "caster_port": 2101,
     "username": "YOUR_NTRIP_USERNAME",
     "password": "YOUR_NTRIP_PASSWORD",
-    "mountpoint": "YOUR_MOUNTPOINT"
+    "mountpoint": "auto"
   },
   "mqtt": {
     "enabled": false,
