@@ -5,6 +5,7 @@ mod ntrip;
 mod parser;
 mod serial_gps;
 mod watchdog;
+mod web_server;
 
 use config::AppConfig;
 use watchdog::Supervisor;
@@ -59,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
         log::info!("MQTT Reporter Configured to: {}", config.mqtt.broker_host);
     } else {
         log::info!("MQTT Reporter is Disabled");
+    }
+    if config.web.enabled {
+        log::info!("Web Server Configured on Port: {}", config.web.port);
+    } else {
+        log::info!("Web Server is Disabled");
     }
 
     // Start Supervisor / Watchdog Monitor

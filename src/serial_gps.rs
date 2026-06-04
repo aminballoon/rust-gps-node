@@ -4,6 +4,8 @@ use crate::parser::Parser;
 use crate::watchdog::WatchdogMsg;
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver as TokioReceiver, Sender as TokioSender};
@@ -17,6 +19,19 @@ pub async fn run_serial(
     mut rtcm_rx: TokioReceiver<Vec<u8>>,
     watchdog_tx: TokioSender<WatchdogMsg>,
 ) -> Result<()> {
+    let shutdown_trigger = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown_trigger.clone();
+
+    struct DropGuard {
+        flag: Arc<AtomicBool>,
+    }
+    impl Drop for DropGuard {
+        fn drop(&mut self) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+    let _guard = DropGuard { flag: shutdown_trigger };
+
     let (tx_err, rx_err) = std::sync::mpsc::channel::<anyhow::Error>();
     let (sync_rtcm_tx, sync_rtcm_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
@@ -32,6 +47,7 @@ pub async fn run_serial(
     let config_clone = config.clone();
     let watchdog_tx_clone = watchdog_tx.clone();
     let device_type_clone = device_type.clone();
+    let shutdown_clone2 = shutdown_clone.clone();
     
     let serial_thread_handle = thread::spawn(move || {
         let result = (move || -> Result<()> {
@@ -39,7 +55,7 @@ pub async fn run_serial(
                 crate::config::BaudRateSetting::Numeric(n) => *n,
                 crate::config::BaudRateSetting::StringVal(s) => {
                     if s.to_lowercase() == "auto" {
-                        match auto_detect_baud_rate(&config_clone.port) {
+                        match auto_detect_baud_rate(&config_clone.port, shutdown_clone2) {
                             Some(detected) => detected,
                             None => {
                                 log::warn!("Baud rate auto-detection failed. Falling back to 115200");
@@ -128,6 +144,11 @@ pub async fn run_serial(
             let mut last_telemetry_send = Instant::now();
 
             loop {
+                if shutdown_clone.load(Ordering::SeqCst) {
+                    log::info!("Serial native thread received shutdown signal.");
+                    break;
+                }
+
                 // Send heartbeat to watchdog
                 if last_heartbeat.elapsed() >= Duration::from_secs(1) {
                     if watchdog_tx_clone.blocking_send(WatchdogMsg::Heartbeat("serial".to_string())).is_err() {
@@ -190,10 +211,14 @@ pub async fn run_serial(
     }
 }
 
-fn auto_detect_baud_rate(port_path: &str) -> Option<u32> {
+fn auto_detect_baud_rate(port_path: &str, shutdown_clone: Arc<AtomicBool>) -> Option<u32> {
     let candidate_rates = [115200, 9600, 230400, 38400, 57600, 921600, 460800, 19200];
     
     for &baud in &candidate_rates {
+        if shutdown_clone.load(Ordering::SeqCst) {
+            log::info!("Auto-detection interrupted by shutdown signal.");
+            return None;
+        }
         log::info!("Scanning baud rate {} on {}...", baud, port_path);
         
         let mut port = match serialport::new(port_path, baud)
@@ -211,6 +236,10 @@ fn auto_detect_baud_rate(port_path: &str) -> Option<u32> {
         
         // Read for up to 800ms
         while start.elapsed() < Duration::from_millis(800) {
+            if shutdown_clone.load(Ordering::SeqCst) {
+                log::info!("Auto-detection interrupted by shutdown signal.");
+                return None;
+            }
             match port.read(&mut read_buf) {
                 Ok(n) if n > 0 => {
                     let data = &read_buf[..n];

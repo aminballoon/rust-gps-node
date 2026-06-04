@@ -1,5 +1,6 @@
 {
   "general": {
+    "device_id": "1",
     "device_type": "ublox",
     "log_directory": "./logs",
     "log_rotation_hours": 1
@@ -28,5 +29,9 @@
   "watchdog": {
     "check_interval_secs": 2,
     "heartbeat_timeout_secs": 10
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080
   }
 }

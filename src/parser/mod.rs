@@ -6,6 +6,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct GpsTelemetry {
+    pub device_id: String,
     pub timestamp: String,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,

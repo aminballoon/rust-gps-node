@@ -5,6 +5,7 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GeneralConfig {
+    pub device_id: String,
     pub device_type: String,
     pub log_directory: String,
     pub log_rotation_hours: u64,
@@ -46,8 +47,15 @@ pub struct MqttConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WatchdogConfig {
+    #[allow(dead_code)]
     pub check_interval_secs: u64,
     pub heartbeat_timeout_secs: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebConfig {
+    pub enabled: bool,
+    pub port: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -57,6 +65,7 @@ pub struct AppConfig {
     pub ntrip: NtripConfig,
     pub mqtt: MqttConfig,
     pub watchdog: WatchdogConfig,
+    pub web: WebConfig,
 }
 
 impl AppConfig {

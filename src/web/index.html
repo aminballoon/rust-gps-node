@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPS RTK/PPK Telemetry Node</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet Map CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #090a0f 0%, #121420 100%);
+      --card-bg: rgba(22, 26, 43, 0.45);
+      --card-border: rgba(255, 255, 255, 0.05);
+      --card-border-glow: rgba(59, 130, 246, 0.15);
+      
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      
+      --accent-blue: #3b82f6;
+      --accent-blue-glow: rgba(59, 130, 246, 0.5);
+      
+      --color-fixed: #10b981;
+      --color-fixed-glow: rgba(16, 185, 129, 0.4);
+      --color-float: #f59e0b;
+      --color-float-glow: rgba(245, 158, 11, 0.4);
+      --color-3dfix: #06b6d4;
+      --color-3dfix-glow: rgba(6, 182, 212, 0.4);
+      --color-nofix: #ef4444;
+      --color-nofix-glow: rgba(239, 68, 68, 0.4);
+      --color-default: #64748b;
+      --color-default-glow: rgba(100, 116, 139, 0.4);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Outfit', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      background: var(--bg-gradient);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Scrollbar Styling */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.2);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    /* Layout */
+    header {
+      background: rgba(15, 18, 36, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-pulse {
+      width: 12px;
+      height: 12px;
+      background-color: var(--accent-blue);
+      border-radius: 50%;
+      box-shadow: 0 0 12px var(--accent-blue-glow);
+      animation: pulse-ring 2s infinite;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      background: linear-gradient(90deg, #fff 0%, #93c5fd 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .system-status {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      font-size: 0.85rem;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--color-nofix);
+    }
+
+    .status-dot.connected {
+      background-color: var(--color-fixed);
+      box-shadow: 0 0 8px var(--color-fixed-glow);
+      animation: pulse-light 1.5s infinite;
+    }
+
+    /* Dashboard Container */
+    .dashboard {
+      flex: 1;
+      padding: 1.5rem;
+      max-width: 1600px;
+      width: 100%;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 1.5rem;
+      height: calc(100vh - 70px);
+    }
+
+    @media (max-width: 1100px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+        height: auto;
+        overflow-y: auto;
+      }
+    }
+
+    /* Left Panel: Map & Stats Grid */
+    .main-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      min-height: 0; /* allows flex item to shrink in height */
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+
+    /* Glass Card */
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at top left, var(--card-border-glow), transparent 60%);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.1);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .card:hover::before {
+      opacity: 1;
+    }
+
+    .card-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .card-title svg {
+      width: 16px;
+      height: 16px;
+      stroke: var(--text-muted);
+    }
+
+    .card-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-top: 0.25rem;
+    }
+
+    .card-subtext {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    /* Fix Type Specific Customizations */
+    .fix-badge {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .fix-RTK_FIXED {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--color-fixed);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+
+    .fix-RTK_FLOAT {
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--color-float);
+      border: 1px solid rgba(245, 158, 11, 0.2);
+    }
+
+    .fix-3D_FIX, .fix-2D_FIX, .fix-DGPS, .fix-GPS_SPS {
+      background: rgba(6, 182, 212, 0.15);
+      color: var(--color-3dfix);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+    }
+
+    .fix-NO_FIX {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--color-nofix);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+    }
+
+    .badge-connected {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--color-fixed);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+
+    .badge-disconnected {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--color-nofix);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+    }
+
+    .badge-disabled {
+      background: rgba(100, 116, 139, 0.15);
+      color: var(--color-default);
+      border: 1px solid rgba(100, 116, 139, 0.2);
+    }
+
+    /* Coordinate Copy Button */
+    .coord-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .copy-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .copy-btn:hover {
+      color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    /* Map Box */
+    .map-container {
+      flex: 1;
+      min-height: 350px;
+      border-radius: 20px;
+      border: 1px solid var(--card-border);
+      overflow: hidden;
+      position: relative;
+      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.6);
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      background: #0d0e14;
+    }
+
+    .map-overlay-controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .map-btn {
+      background: rgba(18, 22, 40, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-primary);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    }
+
+    .map-btn:hover {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+    }
+
+    /* Right Panel: Side Controls and Live Stream */
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      min-height: 0;
+    }
+
+    /* Compass dial */
+    .compass-card {
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    .compass-container {
+      position: relative;
+      width: 140px;
+      height: 140px;
+      margin: 10px auto;
+    }
+
+    .compass-dial {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      border: 2px dashed rgba(255, 255, 255, 0.1);
+      position: relative;
+      transform: rotate(0deg);
+      transition: transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    .compass-arrow {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-bottom: 45px solid var(--accent-blue);
+      transform: translate(-50%, -100%);
+      filter: drop-shadow(0 0 6px var(--accent-blue-glow));
+    }
+
+    .compass-arrow-south {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-top: 45px solid #ef4444;
+      transform: translate(-50%, 0);
+    }
+
+    .compass-label {
+      position: absolute;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-secondary);
+    }
+    
+    .compass-n { top: 4px; left: 50%; transform: translateX(-50%); color: var(--accent-blue); }
+    .compass-e { right: 8px; top: 50%; transform: translateY(-50%); }
+    .compass-s { bottom: 4px; left: 50%; transform: translateX(-50%); color: #ef4444; }
+    .compass-w { left: 8px; top: 50%; transform: translateY(-50%); }
+
+    .compass-value {
+      text-align: center;
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-top: 5px;
+    }
+
+    /* Terminal Console */
+    .terminal-card {
+      flex: 1;
+      min-height: 250px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .terminal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .terminal-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .terminal-btn {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-secondary);
+      font-size: 0.7rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .terminal-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .terminal-btn.active {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: #fff;
+    }
+
+    .terminal-console {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.4);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.02);
+      padding: 0.75rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: #34d399; /* terminal green */
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .log-line {
+      margin-bottom: 4px;
+      line-height: 1.4;
+      border-left: 2px solid transparent;
+      padding-left: 6px;
+    }
+
+    .log-line.gga {
+      border-color: #60a5fa;
+      color: #93c5fd;
+    }
+
+    .log-line.system {
+      border-color: #fb7185;
+      color: #fda4af;
+      font-style: italic;
+    }
+
+    /* Pulse Animations */
+    @keyframes pulse-ring {
+      0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+      }
+      70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 8px rgba(59, 130, 246, 0);
+      }
+      100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+      }
+    }
+
+    @keyframes pulse-light {
+      0% { opacity: 0.6; }
+      50% { opacity: 1; }
+      100% { opacity: 0.6; }
+    }
+
+    /* Leaflet customization for premium looks */
+    .leaflet-bar {
+      border: 1px solid rgba(255,255,255,0.1) !important;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3) !important;
+    }
+    .leaflet-bar a {
+      background-color: rgba(18, 22, 40, 0.9) !important;
+      color: var(--text-primary) !important;
+      border-bottom: 1px solid rgba(255,255,255,0.1) !important;
+      transition: all 0.2s ease;
+    }
+    .leaflet-bar a:hover {
+      background-color: var(--accent-blue) !important;
+    }
+
+    .card-error {
+      display: none;
+      color: #fca5a5;
+      font-size: 0.75rem;
+      font-family: 'JetBrains Mono', monospace;
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: rgba(239, 68, 68, 0.15);
+      border-radius: 8px;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-pulse"></div>
+      <h1>GPS RTK/PPK Telemetry Node</h1>
+    </div>
+    
+    <div class="system-status">
+      <div class="status-item">
+        <span>Device ID:</span>
+        <strong id="stat-device-id">--</strong>
+      </div>
+      <div class="status-item">
+        <span>Uptime:</span>
+        <strong id="system-uptime">00:00:00</strong>
+      </div>
+      <div class="status-item">
+        <span>WebSocket:</span>
+        <div id="ws-status-dot" class="status-dot"></div>
+        <strong id="ws-status-text">Disconnected</strong>
+      </div>
+    </div>
+  </header>
+
+  <div class="dashboard">
+    <!-- Left panel: Map + Dashboard grid -->
+    <div class="main-panel">
+      
+      <!-- Stats Cards -->
+      <div class="stats-grid">
+        <!-- Fix status -->
+        <div class="card">
+          <div class="card-title">
+            <span>Fix Status</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+            </svg>
+          </div>
+          <div class="card-value">
+            <span id="stat-fix-badge" class="fix-badge fix-NO_FIX">NO_FIX</span>
+          </div>
+          <div class="card-subtext" id="stat-satellites">Satellites in view: 0</div>
+          <div class="card-error" id="stat-gps-error"></div>
+        </div>
+
+        <!-- Coordinates -->
+        <div class="card">
+          <div class="card-title">
+            <span>Coordinates</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+            </svg>
+          </div>
+          <div class="coord-container">
+            <div>
+              <div class="card-value" style="font-size: 1.2rem; font-family: 'JetBrains Mono', monospace;" id="stat-coords-lat">--.------° N</div>
+              <div class="card-value" style="font-size: 1.2rem; font-family: 'JetBrains Mono', monospace;" id="stat-coords-lon">---.------° E</div>
+            </div>
+            <button class="copy-btn" id="copy-coords-btn" title="Copy Coordinates">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width: 20px; height: 20px;">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.057 1.123-.08M15.75 18H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08M15.75 18.75v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5A3.375 3.375 0 006.375 7.5H5.25m11.9-3.664A2.251 2.251 0 0015 2.25h-1.5a2.251 2.251 0 00-2.15 1.586m5.8 0c.065.21.1.433.1.664v.75h-6V4.5c0-.231.035-.454.1-.664M6.75 7.5H4.875c-.621 0-1.125.504-1.125 1.125v12c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V16.5a9 9 0 00-9-9z" />
+              </svg>
+            </button>
+          </div>
+          <div class="card-subtext" id="stat-timestamp">Time: --:--:--</div>
+        </div>
+
+        <!-- Altitude -->
+        <div class="card">
+          <div class="card-title">
+            <span>Altitude</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+            </svg>
+          </div>
+          <div class="card-value" id="stat-altitude">--.-- m</div>
+          <div class="card-subtext">Above mean sea level</div>
+        </div>
+
+        <!-- Speed -->
+        <div class="card">
+          <div class="card-title">
+            <span>Speed</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.362 5.214A8.252 8.252 0 0112 21 8.25 8.25 0 016.038 7.048 8.287 8.287 0 009 9.6a8.983 8.983 0 013.361-6.867 8.21 8.21 0 003 2.48z" />
+            </svg>
+          </div>
+          <div class="card-value" id="stat-speed">--.- km/h</div>
+          <div class="card-subtext" id="stat-speed-knots">--.- knots</div>
+        </div>
+
+        <!-- NTRIP Corrections -->
+        <div class="card">
+          <div class="card-title">
+            <span>NTRIP Corrections</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-.778.099-1.533.284-2.253" />
+            </svg>
+          </div>
+          <div class="card-value">
+            <span id="stat-ntrip-badge" class="fix-badge badge-disabled">Offline</span>
+          </div>
+          <div class="card-subtext" id="stat-ntrip-rtcm">Received: 0 bytes</div>
+          <div class="card-subtext" id="stat-ntrip-last">Last chunk: Never</div>
+          <div class="card-error" id="stat-ntrip-error"></div>
+        </div>
+
+        <!-- MQTT Status -->
+        <div class="card">
+          <div class="card-title">
+            <span>MQTT Reporter</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.008 1.24l.885 1.77a2.25 2.25 0 002.007 1.24h1.98a2.25 2.25 0 002.007-1.24l.885-1.77a2.25 2.25 0 012.007-1.24h3.89" />
+            </svg>
+          </div>
+          <div class="card-value">
+            <span id="stat-mqtt-badge" class="fix-badge badge-disabled">Offline</span>
+          </div>
+          <div class="card-subtext" id="stat-mqtt-status">Status: Disabled</div>
+          <div class="card-error" id="stat-mqtt-error"></div>
+        </div>
+      </div>
+
+      <!-- Map Block -->
+      <div class="map-container">
+        <div id="map"></div>
+        <div class="map-overlay-controls">
+          <button class="map-btn" id="map-recenter-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" style="width: 14px; height: 14px;">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21" />
+            </svg>
+            Recenter
+          </button>
+          <button class="map-btn" id="map-clear-trail-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" style="width: 14px; height: 14px;">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            Clear Trail
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel: Compass & Console -->
+    <div class="side-panel">
+      <!-- Compass Card -->
+      <div class="card compass-card">
+        <div class="card-title">
+          <span>Heading</span>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m9-9H3" />
+          </svg>
+        </div>
+        
+        <div class="compass-container">
+          <div class="compass-dial" id="compass-dial">
+            <div class="compass-arrow"></div>
+            <div class="compass-arrow-south"></div>
+            <span class="compass-label compass-n">N</span>
+            <span class="compass-label compass-e">E</span>
+            <span class="compass-label compass-s">S</span>
+            <span class="compass-label compass-w">W</span>
+          </div>
+        </div>
+        
+        <div class="compass-value" id="stat-heading">---°</div>
+      </div>
+
+      <!-- Console Logs Card -->
+      <div class="card terminal-card">
+        <div class="terminal-header">
+          <div class="card-title" style="margin:0;">
+            <span>Parser Stream</span>
+          </div>
+          <div class="terminal-actions">
+            <button class="terminal-btn active" id="btn-scroll">Auto Scroll</button>
+            <button class="terminal-btn" id="btn-clear-terminal">Clear</button>
+          </div>
+        </div>
+        
+        <div class="terminal-console" id="terminal-console"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet Map JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  
+  <script>
+    // State management
+    const appState = {
+      startTime: Date.now(),
+      lat: null,
+      lon: null,
+      alt: null,
+      fixType: 'NO_FIX',
+      satellites: 0,
+      speedKmh: 0,
+      heading: null,
+      timestamp: null,
+      trail: [],
+      autoScrollLogs: true,
+      wsConnected: false
+    };
+
+    // System Uptime counter
+    setInterval(() => {
+      const diffMs = Date.now() - appState.startTime;
+      const secs = Math.floor((diffMs / 1000) % 60);
+      const mins = Math.floor((diffMs / 60000) % 60);
+      const hours = Math.floor(diffMs / 3600000);
+      
+      const pad = (n) => String(n).padStart(2, '0');
+      document.getElementById('system-uptime').textContent = `${pad(hours)}:${pad(mins)}:${pad(secs)}`;
+    }, 1000);
+
+    // Initialize Leaflet Map
+    // Default to Thailand center if no telemetry yet
+    const map = L.map('map', { zoomControl: true }).setView([13.7563, 100.5018], 8);
+    
+    // Premium dark theme tiles: CartoDB Dark Matter
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      subdomains: 'abcd',
+      maxZoom: 20
+    }).addTo(map);
+
+    // Marker styling elements
+    let gpsMarker = null;
+    let gpsAccuracyCircle = null;
+    let gpsTrailLine = L.polyline([], { color: '#3b82f6', weight: 4, opacity: 0.8, lineCap: 'round' }).addTo(map);
+
+    // Get color based on fix type
+    function getFixColor(fix) {
+      switch (fix) {
+        case 'RTK_FIXED': return '#10b981'; // Green
+        case 'RTK_FLOAT': return '#f59e0b'; // Amber
+        case '3D_FIX':
+        case '2D_FIX':
+        case 'DGPS':
+        case 'GPS_SPS': return '#06b6d4';   // Cyan
+        case 'NO_FIX': return '#ef4444';    // Red
+        default: return '#64748b';          // Muted Slate
+      }
+    }
+
+    function updateMapMarker(lat, lon, fix) {
+      const color = getFixColor(fix);
+      
+      // Creating custom icon dynamically using SVG based on fix type color
+      const customIcon = L.divIcon({
+        className: 'custom-gps-icon',
+        html: `
+          <div style="position: relative; width: 20px; height: 20px;">
+            <div style="
+              position: absolute;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              width: 14px;
+              height: 14px;
+              background-color: ${color};
+              border: 2px solid white;
+              border-radius: 50%;
+              box-shadow: 0 0 10px ${color};
+            "></div>
+            <div style="
+              position: absolute;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              width: 30px;
+              height: 30px;
+              border-radius: 50%;
+              background-color: ${color};
+              opacity: 0.2;
+              animation: pulse-ring 2s infinite;
+            "></div>
+          </div>
+        `,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
+      });
+
+      if (gpsMarker) {
+        gpsMarker.setLatLng([lat, lon]);
+        gpsMarker.setIcon(customIcon);
+      } else {
+        gpsMarker = L.marker([lat, lon], { icon: customIcon }).addTo(map);
+        map.setView([lat, lon], 17); // zoom in on first fix
+      }
+
+      // Add to trail path
+      const lastPoint = appState.trail[appState.trail.length - 1];
+      if (!lastPoint || lastPoint[0] !== lat || lastPoint[1] !== lon) {
+        appState.trail.push([lat, lon]);
+        gpsTrailLine.setLatLngs(appState.trail);
+      }
+    }
+
+    // UI Updates
+    function updateUI(data) {
+      if (!data) return;
+
+      if (data.device_id !== undefined) {
+        document.getElementById('stat-device-id').textContent = data.device_id;
+      }
+
+      // Update local state
+      appState.lat = data.latitude;
+      appState.lon = data.longitude;
+      appState.alt = data.altitude;
+      appState.fixType = data.fix_type || 'NO_FIX';
+      appState.satellites = data.satellites || 0;
+      appState.speedKmh = data.speed_kmh || 0;
+      appState.heading = data.heading;
+      appState.timestamp = data.timestamp;
+
+      // 1. Fix Status Card
+      const fixBadge = document.getElementById('stat-fix-badge');
+      fixBadge.textContent = appState.fixType;
+      fixBadge.className = `fix-badge fix-${appState.fixType}`;
+      document.getElementById('stat-satellites').textContent = `Satellites in view: ${appState.satellites}`;
+
+      // 2. Coordinates Card
+      if (appState.lat !== null && appState.lat !== undefined) {
+        document.getElementById('stat-coords-lat').textContent = `${appState.lat.toFixed(8)}° N`;
+        document.getElementById('stat-coords-lon').textContent = `${appState.lon.toFixed(8)}° E`;
+        
+        // Update Leaflet marker & trail
+        updateMapMarker(appState.lat, appState.lon, appState.fixType);
+      } else {
+        document.getElementById('stat-coords-lat').textContent = '--.------° N';
+        document.getElementById('stat-coords-lon').textContent = '---.------° E';
+      }
+      
+      if (appState.timestamp) {
+        document.getElementById('stat-timestamp').textContent = `Time: ${appState.timestamp}`;
+      }
+
+      // 3. Altitude Card
+      if (appState.alt !== null && appState.alt !== undefined) {
+        document.getElementById('stat-altitude').textContent = `${appState.alt.toFixed(3)} m`;
+      } else {
+        document.getElementById('stat-altitude').textContent = '--.-- m';
+      }
+
+      // 4. Speed Card
+      if (appState.speedKmh !== null && appState.speedKmh !== undefined) {
+        document.getElementById('stat-speed').textContent = `${appState.speedKmh.toFixed(1)} km/h`;
+        const knots = appState.speedKmh / 1.852;
+        document.getElementById('stat-speed-knots').textContent = `${knots.toFixed(1)} knots`;
+      } else {
+        document.getElementById('stat-speed').textContent = '--.- km/h';
+        document.getElementById('stat-speed-knots').textContent = '--.- knots';
+      }
+
+      // 5. Compass Heading Card
+      if (appState.heading !== null && appState.heading !== undefined) {
+        document.getElementById('stat-heading').textContent = `${appState.heading.toFixed(1)}°`;
+        // Rotate compass dial (inverse rotation so N stays aligned with heading direction)
+        document.getElementById('compass-dial').style.transform = `rotate(${-appState.heading}deg)`;
+      } else {
+        document.getElementById('stat-heading').textContent = '---°';
+        document.getElementById('compass-dial').style.transform = 'rotate(0deg)';
+      }
+    }
+
+    // Terminal Logging
+    const consoleDiv = document.getElementById('terminal-console');
+    
+    function logToTerminal(message, type = 'gga') {
+      const line = document.createElement('div');
+      line.className = `log-line ${type}`;
+      
+      const timeStr = new Date().toLocaleTimeString();
+      line.textContent = `[${timeStr}] ${message}`;
+      
+      consoleDiv.appendChild(line);
+
+      // Keep maximum 200 lines to prevent memory issues
+      while (consoleDiv.children.length > 200) {
+        consoleDiv.removeChild(consoleDiv.firstChild);
+      }
+
+      if (appState.autoScrollLogs) {
+        consoleDiv.scrollTop = consoleDiv.scrollHeight;
+      }
+    }
+
+    // Copy Coordinates button action
+    document.getElementById('copy-coords-btn').addEventListener('click', function() {
+      if (appState.lat !== null && appState.lon !== null) {
+        const text = `${appState.lat.toFixed(8)}, ${appState.lon.toFixed(8)}`;
+        navigator.clipboard.writeText(text).then(() => {
+          logToTerminal(`System: Copied coordinates: ${text}`, 'system');
+          
+          // Flash button feedback
+          const btn = document.getElementById('copy-coords-btn');
+          const originalHTML = btn.innerHTML;
+          btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="#10b981" style="width: 20px; height: 20px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+          </svg>`;
+          setTimeout(() => {
+            btn.innerHTML = originalHTML;
+          }, 1500);
+        });
+      } else {
+        logToTerminal('System: No valid coordinates to copy yet.', 'system');
+      }
+    });
+
+    // Recenter map action
+    document.getElementById('map-recenter-btn').addEventListener('click', () => {
+      if (appState.lat !== null && appState.lon !== null) {
+        map.setView([appState.lat, appState.lon], map.getZoom() || 17);
+        logToTerminal('System: Centered map on current GPS fix.', 'system');
+      } else {
+        logToTerminal('System: Cannot recenter, no GPS fix.', 'system');
+      }
+    });
+
+    // Clear Trail action
+    document.getElementById('map-clear-trail-btn').addEventListener('click', () => {
+      appState.trail = [];
+      gpsTrailLine.setLatLngs([]);
+      logToTerminal('System: Cleared historical map trail.', 'system');
+    });
+
+    // Terminal controls
+    const scrollBtn = document.getElementById('btn-scroll');
+    scrollBtn.addEventListener('click', () => {
+      appState.autoScrollLogs = !appState.autoScrollLogs;
+      if (appState.autoScrollLogs) {
+        scrollBtn.classList.add('active');
+        consoleDiv.scrollTop = consoleDiv.scrollHeight;
+      } else {
+        scrollBtn.classList.remove('active');
+      }
+    });
+
+    document.getElementById('btn-clear-terminal').addEventListener('click', () => {
+      consoleDiv.innerHTML = '';
+      logToTerminal('Console cleared.', 'system');
+    });
+
+    // Keep track of last errors to avoid duplicate terminal logging
+    let lastGpsError = null;
+    let lastNtripError = null;
+    let lastMqttError = null;
+
+    function updateSystemStatus(status) {
+      if (!status) return;
+
+      // 1. NTRIP Update
+      const ntripBadge = document.getElementById('stat-ntrip-badge');
+      const ntripErrorDiv = document.getElementById('stat-ntrip-error');
+      if (!status.ntrip_enabled) {
+        ntripBadge.textContent = 'Disabled';
+        ntripBadge.className = 'fix-badge badge-disabled';
+        document.getElementById('stat-ntrip-rtcm').textContent = 'Status: Inactive';
+        document.getElementById('stat-ntrip-last').textContent = 'RTCM3 client is disabled';
+        ntripErrorDiv.style.display = 'none';
+      } else {
+        if (status.ntrip_connected) {
+          ntripBadge.textContent = 'Connected';
+          ntripBadge.className = 'fix-badge badge-connected';
+          ntripErrorDiv.style.display = 'none';
+        } else {
+          ntripBadge.textContent = 'Reconnecting';
+          ntripBadge.className = 'fix-badge badge-disconnected';
+          if (status.ntrip_error) {
+            ntripErrorDiv.textContent = status.ntrip_error;
+            ntripErrorDiv.style.display = 'block';
+          } else {
+            ntripErrorDiv.style.display = 'none';
+          }
+        }
+        
+        // Format bytes nicely
+        let rtcmText = `${status.rtcm_bytes_received.toLocaleString()} bytes`;
+        if (status.rtcm_bytes_received > 1024 * 1024) {
+          rtcmText = `${(status.rtcm_bytes_received / (1024 * 1024)).toFixed(2)} MB`;
+        } else if (status.rtcm_bytes_received > 1024) {
+          rtcmText = `${(status.rtcm_bytes_received / 1024).toFixed(2)} KB`;
+        }
+        document.getElementById('stat-ntrip-rtcm').textContent = `Received: ${rtcmText}`;
+        document.getElementById('stat-ntrip-last').textContent = `Last packet: ${status.last_rtcm_timestamp}`;
+      }
+
+      // 2. MQTT Update
+      const mqttBadge = document.getElementById('stat-mqtt-badge');
+      const mqttErrorDiv = document.getElementById('stat-mqtt-error');
+      if (!status.mqtt_enabled) {
+        mqttBadge.textContent = 'Disabled';
+        mqttBadge.className = 'fix-badge badge-disabled';
+        document.getElementById('stat-mqtt-status').textContent = 'MQTT client is disabled';
+        mqttErrorDiv.style.display = 'none';
+      } else {
+        if (status.mqtt_connected) {
+          mqttBadge.textContent = 'Connected';
+          mqttBadge.className = 'fix-badge badge-connected';
+          document.getElementById('stat-mqtt-status').textContent = 'Publishing telemetry every 60s';
+          mqttErrorDiv.style.display = 'none';
+        } else {
+          mqttBadge.textContent = 'Disconnected';
+          mqttBadge.className = 'fix-badge badge-disconnected';
+          document.getElementById('stat-mqtt-status').textContent = 'Connection failed / Retrying';
+          if (status.mqtt_error) {
+            mqttErrorDiv.textContent = status.mqtt_error;
+            mqttErrorDiv.style.display = 'block';
+          } else {
+            mqttErrorDiv.style.display = 'none';
+          }
+        }
+      }
+
+      // 3. GPS / Serial Update
+      const gpsErrorDiv = document.getElementById('stat-gps-error');
+      if (!status.gps_connected) {
+        if (status.gps_error) {
+          gpsErrorDiv.textContent = status.gps_error;
+          gpsErrorDiv.style.display = 'block';
+        } else {
+          gpsErrorDiv.textContent = 'GPS receiver disconnected';
+          gpsErrorDiv.style.display = 'block';
+        }
+      } else {
+        gpsErrorDiv.style.display = 'none';
+      }
+
+      // Log error state transitions in the terminal window
+      if (status.gps_error && status.gps_error !== lastGpsError) {
+        logToTerminal(`GPS Watchdog: ${status.gps_error}`, 'system');
+      }
+      if (status.ntrip_error && status.ntrip_error !== lastNtripError) {
+        logToTerminal(`NTRIP Watchdog: ${status.ntrip_error}`, 'system');
+      }
+      if (status.mqtt_error && status.mqtt_error !== lastMqttError) {
+        logToTerminal(`MQTT Watchdog: ${status.mqtt_error}`, 'system');
+      }
+      lastGpsError = status.gps_error;
+      lastNtripError = status.ntrip_error;
+      lastMqttError = status.mqtt_error;
+    }
+
+    // Fetch initial HTTP telemetry & status
+    async function fetchInitialData() {
+      try {
+        const telResponse = await fetch('/api/telemetry');
+        if (telResponse.ok) {
+          const data = await telResponse.json();
+          updateUI(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch initial telemetry:', err);
+      }
+
+      try {
+        const statusResponse = await fetch('/api/status');
+        if (statusResponse.ok) {
+          const data = await statusResponse.json();
+          updateSystemStatus(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch initial status:', err);
+      }
+    }
+
+    // Set up WebSocket connection
+    let ws = null;
+    function connectWebSocket() {
+      const loc = window.location;
+      const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProto}//${loc.host}/ws`;
+      
+      logToTerminal(`Connecting to WebSocket stream at ${wsUrl}...`, 'system');
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        appState.wsConnected = true;
+        document.getElementById('ws-status-dot').className = 'status-dot connected';
+        document.getElementById('ws-status-text').textContent = 'Connected';
+        document.getElementById('ws-status-text').style.color = 'var(--color-fixed)';
+        logToTerminal('WebSocket connected. Receiving 1Hz live streams.', 'system');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'gga') {
+            // Raw NMEA sentence
+            logToTerminal(data.data, 'gga');
+          } else if (data.type === 'status') {
+            // Update NTRIP and MQTT statuses
+            updateSystemStatus(data.data);
+          } else {
+            // Live telemetry update
+            updateUI(data);
+          }
+        } catch (e) {
+          console.error('Error parsing WS message:', e);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        appState.wsConnected = false;
+        document.getElementById('ws-status-dot').className = 'status-dot';
+        document.getElementById('ws-status-text').textContent = 'Disconnected';
+        document.getElementById('ws-status-text').style.color = 'var(--color-nofix)';
+        logToTerminal('WebSocket connection closed. Retrying in 3 seconds...', 'system');
+        
+        setTimeout(connectWebSocket, 3000);
+      };
+    }
+
+    // Start
+    fetchInitialData();
+    connectWebSocket();
+
+  </script>
+</body>
+</html>
