@@ -22,6 +22,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Check if command line argument is a scan command
     let args: Vec<String> = std::env::args().collect();
+    
+    // Resolve config path:
+    // 1. Check GPS_CONFIG_PATH environment variable
+    // 2. Or check if a path is passed as a command line argument (excluding "scan" commands)
+    // 3. Fall back to "config.json"
+    let mut config_path = std::env::var("GPS_CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string());
+    if args.len() > 1 && !args[1].starts_with('-') && !args[1].contains("scan") {
+        config_path = args[1].clone();
+    }
+
     if args.iter().any(|arg| {
         arg == "scan"
             || arg == "scan-mountpoints"
@@ -30,9 +40,8 @@ async fn main() -> anyhow::Result<()> {
             || arg == "scan-mountpoint"
             || arg == "--scan"
     }) {
-        let config_path = "config.json";
         log::info!("Loading configuration for scan from: {}", config_path);
-        let config = AppConfig::load_from_file(config_path)?;
+        let config = AppConfig::load_from_file(&config_path)?;
         ntrip::scan_mountpoints(&config.ntrip).await?;
         return Ok(());
     }
@@ -40,9 +49,8 @@ async fn main() -> anyhow::Result<()> {
     log::info!("=== Starting GPS RTK/PPK System Node ===");
 
     // Load configuration file
-    let config_path = "config.json";
     log::info!("Loading configuration from: {}", config_path);
-    let config = AppConfig::load_from_file(config_path)?;
+    let config = AppConfig::load_from_file(&config_path)?;
 
     // Print parsed parameters to verify load
     log::info!("Device Type Configured: {}", config.general.device_type);
