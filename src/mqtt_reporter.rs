@@ -1,4 +1,4 @@
-use crate::config::MqttConfig;
+use crate::config::AppConfig;
 use crate::parser::GpsTelemetry;
 use crate::watchdog::WatchdogMsg;
 use anyhow::{anyhow, Result};
@@ -16,6 +16,9 @@ pub struct MqttTaskInput {
     pub ntrip_connected: bool,
     pub ntrip_error: Option<String>,
     pub mqtt_error: Option<String>,
+    pub active_bin_file: Option<String>,
+    pub public_url: Option<String>,
+    pub ssh_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -32,13 +35,33 @@ pub struct MqttStatusFields {
     pub gps_error: Option<String>,
     pub ntrip_connected: bool,
     pub ntrip_error: Option<String>,
+    pub active_bin_file: Option<String>,
+    /// Publicly reachable URL of the on-board Web/WS server (e.g. cloudflared
+    /// tunnel). `None` if no tunnel is up.
+    pub public_url: Option<String>,
+    /// Publicly reachable SSH command (e.g. `ssh -p 12345 pico@bore.pub`).
+    /// `None` if no SSH TCP tunnel is up.
+    pub ssh_endpoint: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum MqttConfigPayload {
+    Command {
+        action: String,
+        config: Option<AppConfig>,
+    },
+    RawConfig(AppConfig),
+    StringCommand(String),
 }
 
 pub async fn run_mqtt(
-    config: MqttConfig,
+    app_config: AppConfig,
     mut telemetry_rx: TokioReceiver<MqttTaskInput>,
     watchdog_tx: TokioSender<WatchdogMsg>,
 ) -> Result<()> {
+    let config = &app_config.mqtt;
+
     if !config.enabled {
         log::info!("MQTT client is disabled in configuration.");
         loop {
@@ -76,8 +99,62 @@ pub async fn run_mqtt(
                         log::trace!("MQTT Event: {:?}", notification);
                         match notification {
                             Event::Incoming(Incoming::ConnAck(_)) => {
-                                log::info!("MQTT Connection established.");
+                                log::info!("MQTT Connection established. Subscribing to /gps/node_config...");
                                 mqtt_connected = true;
+                                if let Err(e) = client.subscribe("/gps/node_config", QoS::AtLeastOnce).await {
+                                    log::error!("Failed to subscribe to /gps/node_config: {:?}", e);
+                                }
+                            }
+                            Event::Incoming(Incoming::Publish(publish)) => {
+                                if publish.topic == "/gps/node_config" {
+                                    let payload = String::from_utf8_lossy(&publish.payload);
+                                    log::info!("Received MQTT message on /gps/node_config: {}", payload);
+                                    
+                                    match serde_json::from_str::<MqttConfigPayload>(&payload) {
+                                        Ok(MqttConfigPayload::Command { action, config }) => {
+                                            if action == "get" {
+                                                log::info!("MQTT get request received. Publishing current config.");
+                                                let resp = serde_json::json!({
+                                                    "action": "config",
+                                                    "config": app_config
+                                                });
+                                                if let Ok(resp_str) = serde_json::to_string(&resp) {
+                                                    let _ = client.publish("/gps/node_config", QoS::AtMostOnce, false, resp_str.as_bytes().to_vec()).await;
+                                                }
+                                            } else if action == "set" || action == "write" || action == "change" {
+                                                if let Some(new_cfg) = config {
+                                                    log::info!("MQTT set request received. Updating config.");
+                                                    let _ = watchdog_tx.send(WatchdogMsg::SetConfig(new_cfg)).await;
+                                                }
+                                            } else if action == "config" {
+                                                log::trace!("Received config broadcast, ignoring loopback");
+                                            }
+                                        }
+                                        Ok(MqttConfigPayload::RawConfig(new_cfg)) => {
+                                            if new_cfg != app_config {
+                                                log::info!("MQTT raw config update received. Updating config.");
+                                                let _ = watchdog_tx.send(WatchdogMsg::SetConfig(new_cfg)).await;
+                                            } else {
+                                                log::trace!("MQTT raw config received matches current config. Ignoring.");
+                                            }
+                                        }
+                                        Ok(MqttConfigPayload::StringCommand(cmd)) => {
+                                            if cmd == "get" {
+                                                log::info!("MQTT string command 'get' received. Publishing current config.");
+                                                let resp = serde_json::json!({
+                                                    "action": "config",
+                                                    "config": app_config
+                                                });
+                                                if let Ok(resp_str) = serde_json::to_string(&resp) {
+                                                    let _ = client.publish("/gps/node_config", QoS::AtMostOnce, false, resp_str.as_bytes().to_vec()).await;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to parse MQTT config payload: {:?}", e);
+                                        }
+                                    }
+                                }
                             }
                             Event::Outgoing(rumqttc::Outgoing::Disconnect) => {
                                 mqtt_connected = false;
@@ -102,6 +179,9 @@ pub async fn run_mqtt(
                         gps_error: input.gps_error,
                         ntrip_connected: input.ntrip_connected,
                         ntrip_error: input.ntrip_error,
+                        active_bin_file: input.active_bin_file,
+                        public_url: input.public_url,
+                        ssh_endpoint: input.ssh_endpoint,
                     },
                 };
 

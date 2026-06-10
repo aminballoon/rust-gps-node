@@ -14,7 +14,24 @@ pub enum WatchdogMsg {
     Rtcm(Vec<u8>),           // RTCM corrections from NTRIP -> Serial
     Gga(String),             // GGA sentence from Serial -> NTRIP
     Telemetry(GpsTelemetry), // Telemetry from Serial -> MQTT
+    SetConfig(AppConfig),
+    ActiveBinFile(String),
+    /// Latest publicly reachable URL of the WS/Web server (e.g. cloudflared
+    /// tunnel). `None` = tunnel down. Sourced by a small background poller
+    /// that watches /run/gps-project/public_url.
+    PublicUrl(Option<String>),
+    /// Latest publicly reachable SSH command string (e.g. produced by a
+    /// `bore local 22 --to bore.pub` wrapper). `None` = tunnel down.
+    /// Sourced from /run/gps-project/ssh_url.
+    SshEndpoint(Option<String>),
 }
+
+/// Path written by an external tunnel agent (e.g. cloudflared wrapper) to
+/// publish the current public URL of the web server. Empty/missing file =
+/// no tunnel up.
+const PUBLIC_URL_FILE: &str = "/run/gps-project/public_url";
+/// Path written by the bore SSH tunnel wrapper.
+const SSH_URL_FILE: &str = "/run/gps-project/ssh_url";
 
 struct ComponentState {
     name: String,
@@ -25,11 +42,12 @@ struct ComponentState {
 
 pub struct Supervisor {
     config: AppConfig,
+    config_path: String,
 }
 
 impl Supervisor {
-    pub fn new(config: AppConfig) -> Self {
-        Self { config }
+    pub fn new(config: AppConfig, config_path: String) -> Self {
+        Self { config, config_path }
     }
 
     pub async fn run(&self) {
@@ -52,7 +70,45 @@ impl Supervisor {
         let mut ntrip_error: Option<String> = None;
         let mut mqtt_error: Option<String> = None;
 
-        let timeout_dur = Duration::from_secs(self.config.watchdog.heartbeat_timeout_secs);
+        let mut active_config = self.config.clone();
+        let mut timeout_dur = Duration::from_secs(active_config.watchdog.heartbeat_timeout_secs);
+        let mut active_bin_file: Option<String> = None;
+        let mut public_url: Option<String> = None;
+        let mut ssh_endpoint: Option<String> = None;
+
+        // Background poller: watch a file for changes and dispatch via the
+        // watchdog channel. Decoupled from the tunnel agent so any source
+        // (cloudflared, bore, ngrok, custom) can populate the file.
+        fn spawn_file_watcher<F>(
+            tx: mpsc::Sender<WatchdogMsg>,
+            path: &'static str,
+            label: &'static str,
+            wrap: F,
+        ) where
+            F: Fn(Option<String>) -> WatchdogMsg + Send + 'static,
+        {
+            tokio::spawn(async move {
+                let mut last: Option<String> = None;
+                loop {
+                    let cur = tokio::fs::read_to_string(path)
+                        .await
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if cur != last {
+                        log::info!("[WATCHDOG] {} changed: {:?} -> {:?}", label, last, cur);
+                        if tx.send(wrap(cur.clone())).await.is_err() {
+                            break;
+                        }
+                        last = cur;
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+        }
+
+        spawn_file_watcher(watchdog_tx.clone(), PUBLIC_URL_FILE, "public_url", WatchdogMsg::PublicUrl);
+        spawn_file_watcher(watchdog_tx.clone(), SSH_URL_FILE,    "ssh_endpoint", WatchdogMsg::SshEndpoint);
 
         // Initialize component states
         let now = Instant::now();
@@ -82,6 +138,7 @@ impl Supervisor {
         };
 
         let mut latest_telemetry = GpsTelemetry::default();
+        let mut last_telemetry_received: Option<Instant> = None;
         let mut publish_timer = tokio::time::interval(Duration::from_secs(1));
         let mut last_mqtt_publish = Instant::now() - Duration::from_secs(1);
 
@@ -100,14 +157,15 @@ impl Supervisor {
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(1000);
                     serial_route_tx = Some(tx);
                     
-                    let serial_cfg = self.config.serial.clone();
-                    let device_type = self.config.general.device_type.clone();
-                    let log_dir = self.config.general.log_directory.clone();
-                    let log_rotation = self.config.general.log_rotation_hours;
+                    let serial_cfg = active_config.serial.clone();
+                    let device_type = active_config.general.device_type.clone();
+                    let log_dir = active_config.general.log_directory.clone();
+                    let log_rotation = active_config.general.log_rotation_hours;
+                    let utc_offset = active_config.general.utc_offset_hours;
                     let watchdog_tx_clone = watchdog_tx.clone();
                     
                     let handle = tokio::spawn(async move {
-                        run_serial(serial_cfg, device_type, log_dir, log_rotation, rx, watchdog_tx_clone).await
+                        run_serial(serial_cfg, device_type, log_dir, log_rotation, utc_offset, rx, watchdog_tx_clone).await
                     });
                     
                     serial_state.handle = Some(handle);
@@ -127,7 +185,7 @@ impl Supervisor {
                     let (tx, rx) = mpsc::channel::<String>(100);
                     ntrip_route_tx = Some(tx);
                     
-                    let ntrip_cfg = self.config.ntrip.clone();
+                    let ntrip_cfg = active_config.ntrip.clone();
                     let watchdog_tx_clone = watchdog_tx.clone();
                     
                     let handle = tokio::spawn(async move {
@@ -151,11 +209,11 @@ impl Supervisor {
                     let (tx, rx) = mpsc::channel::<crate::mqtt_reporter::MqttTaskInput>(100);
                     mqtt_route_tx = Some(tx);
                     
-                    let mqtt_cfg = self.config.mqtt.clone();
+                    let app_cfg = active_config.clone();
                     let watchdog_tx_clone = watchdog_tx.clone();
                     
                     let handle = tokio::spawn(async move {
-                        run_mqtt(mqtt_cfg, rx, watchdog_tx_clone).await
+                        run_mqtt(app_cfg, rx, watchdog_tx_clone).await
                     });
                     
                     mqtt_state.handle = Some(handle);
@@ -175,11 +233,11 @@ impl Supervisor {
                     let (tx, rx) = mpsc::channel::<WebMsg>(1000);
                     web_route_tx = Some(tx);
                     
-                    let web_cfg = self.config.web.clone();
+                    let app_cfg = active_config.clone();
                     let watchdog_tx_clone = watchdog_tx.clone();
                     
                     let handle = tokio::spawn(async move {
-                        run_web(web_cfg, rx, watchdog_tx_clone).await
+                        run_web(app_cfg, rx, watchdog_tx_clone).await
                     });
                     
                     web_state.handle = Some(handle);
@@ -224,6 +282,75 @@ impl Supervisor {
                         }
                         WatchdogMsg::Telemetry(data) => {
                             latest_telemetry = data;
+                            last_telemetry_received = Some(Instant::now());
+                        }
+                        WatchdogMsg::SetConfig(new_config) => {
+                            if new_config != active_config {
+                                log::info!("[WATCHDOG] Configuration changed! Saving and applying new config...");
+                                if let Err(e) = new_config.save_to_file(&self.config_path) {
+                                    log::error!("[WATCHDOG] Failed to save config to file: {:?}", e);
+                                }
+                                
+                                let serial_changed = new_config.serial != active_config.serial 
+                                    || new_config.general.device_type != active_config.general.device_type
+                                    || new_config.general.log_directory != active_config.general.log_directory
+                                    || new_config.general.log_rotation_hours != active_config.general.log_rotation_hours
+                                    || new_config.general.utc_offset_hours != active_config.general.utc_offset_hours;
+                                let general_changed = new_config.general != active_config.general;
+                                let ntrip_changed = new_config.ntrip != active_config.ntrip;
+                                let mqtt_changed = new_config.mqtt != active_config.mqtt;
+                                let web_changed = new_config.web != active_config.web;
+                                
+                                active_config = new_config;
+                                timeout_dur = Duration::from_secs(active_config.watchdog.heartbeat_timeout_secs);
+                                
+                                if serial_changed {
+                                    log::info!("[WATCHDOG] Restarting Serial component due to config change...");
+                                    if let Some(h) = serial_state.handle.take() {
+                                        h.abort();
+                                    }
+                                    serial_route_tx = None;
+                                    serial_state.restart_at = Some(Instant::now());
+                                }
+                                if ntrip_changed {
+                                    log::info!("[WATCHDOG] Restarting NTRIP component due to config change...");
+                                    if let Some(h) = ntrip_state.handle.take() {
+                                        h.abort();
+                                    }
+                                    ntrip_route_tx = None;
+                                    ntrip_state.restart_at = Some(Instant::now());
+                                }
+                                if mqtt_changed || serial_changed || general_changed || ntrip_changed || web_changed {
+                                    log::info!("[WATCHDOG] Restarting MQTT component due to config change...");
+                                    if let Some(h) = mqtt_state.handle.take() {
+                                        h.abort();
+                                    }
+                                    mqtt_route_tx = None;
+                                    mqtt_state.restart_at = Some(Instant::now());
+                                }
+                                if web_changed {
+                                    log::info!("[WATCHDOG] Restarting Web Server component due to config change...");
+                                    if let Some(h) = web_state.handle.take() {
+                                        h.abort();
+                                    }
+                                    web_route_tx = None;
+                                    web_state.restart_at = Some(Instant::now());
+                                } else {
+                                    // Broadcast new config to WebSocket clients if web server did not restart
+                                    if let Some(ref tx) = web_route_tx {
+                                        let _ = tx.try_send(WebMsg::Config(active_config.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        WatchdogMsg::ActiveBinFile(name) => {
+                            active_bin_file = Some(name);
+                        }
+                        WatchdogMsg::PublicUrl(url) => {
+                            public_url = url;
+                        }
+                        WatchdogMsg::SshEndpoint(ep) => {
+                            ssh_endpoint = ep;
                         }
                     }
                 }
@@ -331,7 +458,8 @@ impl Supervisor {
                     }
 
                     let now_publish = Instant::now();
-                    let gps_connected = serial_state.handle.is_some() && now_publish.duration_since(serial_state.last_heartbeat) < timeout_dur;
+                    let gps_connected = serial_state.handle.is_some()
+                        && last_telemetry_received.map_or(false, |t| t.elapsed() < Duration::from_secs(5));
                     let ntrip_connected = ntrip_state.handle.is_some() && now_publish.duration_since(ntrip_state.last_heartbeat) < timeout_dur;
                     let mqtt_connected = mqtt_state.handle.is_some() && now_publish.duration_since(mqtt_state.last_heartbeat) < timeout_dur;
 
@@ -339,41 +467,59 @@ impl Supervisor {
                     if !gps_connected {
                         current_telemetry = GpsTelemetry::default();
                     }
-                    current_telemetry.device_id = self.config.general.device_id.clone();
+                    current_telemetry.device_id = active_config.general.device_id.clone();
 
-                    // Send telemetry and status to Web UI
-                    if let Some(ref tx) = web_route_tx {
-                        let _ = tx.try_send(WebMsg::Telemetry(current_telemetry.clone()));
-                        let status = crate::web_server::SystemStatus {
-                            ntrip_enabled: self.config.ntrip.enabled,
-                            ntrip_connected,
-                            ntrip_error: ntrip_error.clone(),
-                            mqtt_enabled: self.config.mqtt.enabled,
-                            mqtt_connected,
-                            mqtt_error: mqtt_error.clone(),
-                            rtcm_bytes_received,
-                            last_rtcm_timestamp: last_rtcm_timestamp.clone(),
-                            gps_connected,
-                            gps_error: gps_error.clone(),
-                        };
-                        let _ = tx.try_send(WebMsg::Status(status));
-                    }
+                     // Build the tokenised public URL (base + /<access_token>/)
+                     // so subscribers receive a directly-usable link.
+                     let token = active_config.web.access_token.as_deref().unwrap_or("");
+                     let tokenised_url = public_url.as_ref().map(|base| {
+                         let trimmed = base.trim_end_matches('/');
+                         if token.is_empty() {
+                             trimmed.to_string()
+                         } else {
+                             format!("{}/{}/", trimmed, token)
+                         }
+                     });
 
-                    // Send telemetry and status to MQTT Reporter (every 1 second)
-                    if last_mqtt_publish.elapsed() >= Duration::from_secs(1) {
-                        if let Some(ref tx) = mqtt_route_tx {
-                            let input = crate::mqtt_reporter::MqttTaskInput {
-                                telemetry: current_telemetry,
-                                gps_connected,
-                                gps_error: gps_error.clone(),
-                                ntrip_connected,
-                                ntrip_error: ntrip_error.clone(),
-                                mqtt_error: mqtt_error.clone(),
-                            };
-                            let _ = tx.try_send(input);
-                        }
-                        last_mqtt_publish = Instant::now();
-                    }
+                     // Send telemetry and status to Web UI
+                     if let Some(ref tx) = web_route_tx {
+                         let _ = tx.try_send(WebMsg::Telemetry(current_telemetry.clone()));
+                         let status = crate::web_server::SystemStatus {
+                             ntrip_enabled: active_config.ntrip.enabled,
+                             ntrip_connected,
+                             ntrip_error: ntrip_error.clone(),
+                             mqtt_enabled: active_config.mqtt.enabled,
+                             mqtt_connected,
+                             mqtt_error: mqtt_error.clone(),
+                             rtcm_bytes_received,
+                             last_rtcm_timestamp: last_rtcm_timestamp.clone(),
+                             gps_connected,
+                             gps_error: gps_error.clone(),
+                             active_bin_file: active_bin_file.clone(),
+                             public_url: tokenised_url.clone(),
+                             ssh_endpoint: ssh_endpoint.clone(),
+                         };
+                         let _ = tx.try_send(WebMsg::Status(status));
+                     }
+
+                     // Send telemetry and status to MQTT Reporter (every 1 second)
+                     if last_mqtt_publish.elapsed() >= Duration::from_secs(1) {
+                         if let Some(ref tx) = mqtt_route_tx {
+                             let input = crate::mqtt_reporter::MqttTaskInput {
+                                 telemetry: current_telemetry,
+                                 gps_connected,
+                                 gps_error: gps_error.clone(),
+                                 ntrip_connected,
+                                 ntrip_error: ntrip_error.clone(),
+                                 mqtt_error: mqtt_error.clone(),
+                                 active_bin_file: active_bin_file.clone(),
+                                 public_url: tokenised_url,
+                                 ssh_endpoint: ssh_endpoint.clone(),
+                             };
+                             let _ = tx.try_send(input);
+                         }
+                         last_mqtt_publish = Instant::now();
+                     }
                 }
             }
         }

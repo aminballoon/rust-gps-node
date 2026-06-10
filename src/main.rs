@@ -18,7 +18,6 @@ async fn main() -> anyhow::Result<()> {
             std::env::set_var("RUST_LOG", "info");
         }
     }
-    env_logger::init();
 
     // Check if command line argument is a scan command
     let args: Vec<String> = std::env::args().collect();
@@ -32,6 +31,30 @@ async fn main() -> anyhow::Result<()> {
         config_path = args[1].clone();
     }
 
+    // Load config first to read UTC offset
+    let config_res = AppConfig::load_from_file(&config_path);
+    let utc_offset = match &config_res {
+        Ok(cfg) => cfg.general.utc_offset_hours,
+        Err(_) => 0,
+    };
+
+    let mut builder = env_logger::Builder::from_default_env();
+    builder.format(move |buf, record| {
+        use std::io::Write;
+        use chrono::FixedOffset;
+        let tz = FixedOffset::east_opt(utc_offset * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+        let ts = chrono::Utc::now().with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+        writeln!(
+            buf,
+            "[{} {} {}] {}",
+            ts,
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    });
+    builder.init();
+
     if args.iter().any(|arg| {
         arg == "scan"
             || arg == "scan-mountpoints"
@@ -41,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
             || arg == "--scan"
     }) {
         log::info!("Loading configuration for scan from: {}", config_path);
-        let config = AppConfig::load_from_file(&config_path)?;
+        let config = config_res?;
         ntrip::scan_mountpoints(&config.ntrip).await?;
         return Ok(());
     }
@@ -50,7 +73,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration file
     log::info!("Loading configuration from: {}", config_path);
-    let config = AppConfig::load_from_file(&config_path)?;
+    let mut config = config_res?;
+
+    // Generate web access_token on first run if missing — gates the web/ws
+    // endpoints behind a long random URL prefix.
+    if let Err(e) = config.ensure_web_access_token(&config_path) {
+        log::warn!("Could not persist generated access_token: {:?}", e);
+    }
 
     // Print parsed parameters to verify load
     log::info!("Device Type Configured: {}", config.general.device_type);
@@ -76,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start Supervisor / Watchdog Monitor
-    let supervisor = Supervisor::new(config);
+    let supervisor = Supervisor::new(config, config_path);
     supervisor.run().await;
 
     Ok(())

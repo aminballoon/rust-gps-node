@@ -3,7 +3,8 @@
     "device_id": "1",
     "device_type": "ublox",
     "log_directory": "./logs",
-    "log_rotation_hours": 1
+    "log_rotation_hours": 1,
+    "utc_offset_hours": 7
   },
   "serial": {
     "port": "/dev/ttyACM0",

@@ -16,6 +16,7 @@ pub async fn run_serial(
     device_type: String,
     log_dir: String,
     log_rotation_hours: u64,
+    utc_offset_hours: i32,
     mut rtcm_rx: TokioReceiver<Vec<u8>>,
     watchdog_tx: TokioSender<WatchdogMsg>,
 ) -> Result<()> {
@@ -137,11 +138,15 @@ pub async fn run_serial(
             });
 
             // Reader loop
-            let mut ppk_logger = PpkLogger::new(log_dir, log_rotation_hours);
+            let mut ppk_logger = PpkLogger::new(log_dir, log_rotation_hours, utc_offset_hours);
             let mut parser = Parser::new();
             let mut read_buf = vec![0u8; 1024];
             let mut last_heartbeat = Instant::now();
+            let mut last_data_received = Instant::now();
+            let mut last_warning = Instant::now();
             let mut last_telemetry_send = Instant::now();
+
+            let mut current_bin = None;
 
             loop {
                 if shutdown_clone.load(Ordering::SeqCst) {
@@ -149,22 +154,43 @@ pub async fn run_serial(
                     break;
                 }
 
-                // Send heartbeat to watchdog
-                if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-                    if watchdog_tx_clone.blocking_send(WatchdogMsg::Heartbeat("serial".to_string())).is_err() {
-                        log::error!("Watchdog channel closed");
-                        break;
+                // Send heartbeat to watchdog only if we are actively receiving data.
+                // If we haven't received data for more than 5 seconds, we stop sending heartbeats
+                // so that the Watchdog knows the Serial port is not communicating, and can restart it.
+                if last_data_received.elapsed() < Duration::from_secs(5) {
+                    if last_heartbeat.elapsed() >= Duration::from_secs(1) {
+                        if watchdog_tx_clone.blocking_send(WatchdogMsg::Heartbeat("serial".to_string())).is_err() {
+                            log::error!("Watchdog channel closed");
+                            break;
+                        }
+                        last_heartbeat = Instant::now();
                     }
-                    last_heartbeat = Instant::now();
+                } else if last_warning.elapsed() >= Duration::from_secs(5) {
+                    log::warn!(
+                        "No data received from serial port {} for {} seconds. Holding watchdog heartbeat.",
+                        config_clone.port,
+                        last_data_received.elapsed().as_secs()
+                    );
+                    last_warning = Instant::now();
                 }
 
                 // Blocking read from serial port
                 match port_reader.read(&mut read_buf) {
                     Ok(n) if n > 0 => {
+                        last_data_received = Instant::now();
                         let data = &read_buf[..n];
                         // 1. Log to PPK raw file
                         if let Err(e) = ppk_logger.write(data) {
                             log::error!("PPK logger error: {:?}", e);
+                        }
+                        
+                        let new_bin = ppk_logger.current_file_name();
+                        if new_bin != current_bin {
+                            current_bin = new_bin.clone();
+                            if let Some(ref name) = new_bin {
+                                log::info!("Active PPK log file: {}", name);
+                                let _ = watchdog_tx_clone.blocking_send(WatchdogMsg::ActiveBinFile(name.clone()));
+                            }
                         }
                         
                         // 2. Feed to stream parser & extract GGA NMEA sentences for NTRIP
