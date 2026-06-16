@@ -1,0 +1,20 @@
+[Unit]
+Description=GPS RTK PPK Node Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pico
+Group=pico
+WorkingDirectory=/home/pico/gps-node
+ExecStart=/bin/bash /home/pico/gps-node/gps-tunnel.sh
+Restart=always
+RestartSec=5
+RuntimeDirectory=gps-project
+RuntimeDirectoryMode=0755
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
