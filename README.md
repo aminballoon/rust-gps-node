@@ -105,6 +105,62 @@ To run in debug mode with full console log output:
 RUST_LOG=debug cargo run
 ```
 
+### Cross-Compilation (e.g., for Luckfox Pico Ultra / ARM64v8 / Embedded Linux)
+
+If you are deploying to an Embedded Linux board, you can cross-compile from your host machine (e.g., macOS) using `cargo-zigbuild`.
+
+1. **Install Zig and cargo-zigbuild on your host:**
+   * **macOS:**
+     ```bash
+     brew install zig
+     cargo install cargo-zigbuild
+     ```
+
+2. **Add the target:**
+   * **For ARMv7 (32-bit, e.g., Luckfox Pico Ultra):**
+     ```bash
+     rustup target add armv7-unknown-linux-gnueabihf
+     ```
+   * **For ARM64v8 (64-bit, e.g., Raspberry Pi 4/5, Jetson):**
+     ```bash
+     rustup target add aarch64-unknown-linux-gnu
+     ```
+
+3. **Build the Release Binary:**
+   Specify the GLIBC version if needed (e.g., `.2.35` for Ubuntu 22.04 on the board):
+   * **For ARMv7:**
+     ```bash
+     cargo zigbuild --target armv7-unknown-linux-gnueabihf.2.35 --release
+     ```
+   * **For ARM64v8:**
+     ```bash
+     cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release
+     ```
+
+4. **Transfer the Binary to the Board:**
+   * **For ARMv7:**
+     ```bash
+     scp target/armv7-unknown-linux-gnueabihf/release/gps-project default@<BOARD_IP>:/home/default/
+     ```
+   * **For ARM64v8:**
+     ```bash
+     scp target/aarch64-unknown-linux-gnu/release/gps-project default@<BOARD_IP>:/home/default/
+     ```
+
+### Choosing between GNU (`-gnu`) and MUSL (`-musl`) Targets
+
+When cross-compiling, you can choose between GNU targets (which use `glibc` and dynamic linking) and MUSL targets (which use `musl-libc` and static linking):
+
+* **GNU (`-gnu`) Targets:**
+  * **Linker:** Dynamically linked against `glibc`.
+  * **Characteristics:** Smaller binary size, but depends on the target board's GLIBC version. You must match the GLIBC version (e.g. using `cargo zigbuild --target armv7-unknown-linux-gnueabihf.2.35` if target board uses GLIBC 2.35).
+  * **Best For:** Standard OS distributions like **Ubuntu** or **Debian**.
+* **MUSL (`-musl`) Targets:**
+  * **Linker:** Statically links the entire C standard library (`musl-libc`) into the binary.
+  * **Characteristics:** Slightly larger binary size, but completely self-contained. It has zero external library dependencies and will run on *any* Linux OS of the same architecture (Buildroot, Alpine, Ubuntu, Debian, etc.).
+  * **Best For:** Lightweight/minimal images like **Buildroot**, **uClibc** systems, or when you want a portable binary that runs everywhere.
+  * *Note:* To use MUSL, run `rustup target add armv7-unknown-linux-musleabihf` and build with `--target armv7-unknown-linux-musleabihf`.
+
 ---
 
 ## Component-Level Recovery & Restart Behavior
