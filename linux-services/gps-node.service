@@ -12,8 +12,6 @@ ExecStart=/home/pico/gps-node/gps-project
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
-RuntimeDirectory=gps-project
-RuntimeDirectoryMode=0755
 StandardOutput=journal
 StandardError=journal
 
